@@ -153,7 +153,7 @@ if st.button("1. Generar documento resumen con IA", type="primary"):
           f"TRANSCRIPCIÓN DE ENTRADA:\n{transcripcion}"
       )
       resp = client.models.generate_content(
-          model="gemini-2.5-flash",
+         model="gemini-3.8-flash",
           contents=prompt,
           config=types.GenerateContentConfig(
               system_instruction=SYSTEM_PROMPT_RESUMEN,
@@ -207,7 +207,7 @@ if st.button("Generar PDF y texto de Gmail desde el resumen corregido"):
           f"Resumen validado:\n{resumen_corregido}"
       )
       resp_gmail = client.models.generate_content(
-          model="gemini-2.5-flash",
+          model="gemini-3.8-flash",
           contents=prompt_gmail,
           config=types.GenerateContentConfig(
               system_instruction=SYSTEM_PROMPT_GMAIL,
