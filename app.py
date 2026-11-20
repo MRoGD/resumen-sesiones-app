@@ -16,11 +16,21 @@ st.caption(
     " texto de Gmail para mañana"
 )
 
-MODELOS_RESPALDO_POR_DEFECTO = [
+MODELOS_PRIORITARIOS = [
     "gemini-3.8-flash",
     "gemini-4-hydrogen",
     "gemini-3.8-flash-lite",
 ]
+
+EXCLUIR_MODELOS = (
+    "embedding",
+    "imagen",
+    "veo",
+    "audio",
+    "live",
+    "tts",
+    "aqa",
+)
 
 
 def obtener_claves_gemini() -> list[str]:
@@ -50,9 +60,16 @@ def obtener_claves_gemini() -> list[str]:
   return claves
 
 
+def es_modelo_texto_valido(nombre: str) -> bool:
+  baja = nombre.lower()
+  if "gemini" not in baja:
+    return False
+  return not any(palabra in baja for palabra in EXCLUIR_MODELOS)
+
+
 @st.cache_data(ttl=600, show_spinner=False)
 def listar_modelos_disponibles(primera_clave: str) -> list[str]:
-  """Consulta qué modelos acepta la API para esa clave."""
+  """Consulta qué modelos de texto acepta la API para esa clave."""
   if not primera_clave:
     return []
   try:
@@ -60,12 +77,14 @@ def listar_modelos_disponibles(primera_clave: str) -> list[str]:
     nombres: list[str] = []
     for m in client.models.list():
       nombre = getattr(m, "name", "") or ""
-      # Quita el prefijo "models/" si viene así
       nombre_limpio = nombre.replace("models/", "").strip()
-      if nombre_limpio and "gemini" in nombre_limpio.lower():
-        if nombre_limpio not in nombres:
-          nombres.append(nombre_limpio)
-    return nombres
+      if (
+          nombre_limpio
+          and es_modelo_texto_valido(nombre_limpio)
+          and nombre_limpio not in nombres
+      ):
+        nombres.append(nombre_limpio)
+    return nombres[:6]
   except Exception:
     return []
 
@@ -90,6 +109,7 @@ def generar_con_respaldo(
     modelos_candidatos: list[str],
     system_instruction: str | None = None,
     temperature: float = 0.3,
+    estado_placeholder=None,
 ) -> tuple[str, int, str]:
   """Devuelve (texto_generado, indice_cuenta_usada, modelo_usado)."""
   if not claves:
@@ -102,12 +122,23 @@ def generar_con_respaldo(
       temperature=temperature,
   )
 
+  candidatos_limpios = []
+  for m in modelos_candidatos:
+    m_limpio = m.replace("models/", "").strip()
+    if m_limpio and m_limpio not in candidatos_limpios:
+      candidatos_limpios.append(m_limpio)
+  candidatos_limpios = candidatos_limpios[:5]
+
   ultimo_error = None
   total_claves = len(claves)
 
   for idx, clave in enumerate(claves, start=1):
     client = genai.Client(api_key=clave)
-    for modelo_actual in modelos_candidatos:
+    for modelo_actual in candidatos_limpios:
+      if estado_placeholder is not None:
+        estado_placeholder.caption(
+            f"Probando cuenta #{idx}/{total_claves} con `{modelo_actual}`..."
+        )
       try:
         resp = client.models.generate_content(
             model=modelo_actual,
@@ -118,12 +149,13 @@ def generar_con_respaldo(
         if not texto:
           raise RuntimeError("La respuesta ha llegado vacía.")
 
+        if estado_placeholder is not None:
+          estado_placeholder.empty()
         return texto, idx, modelo_actual
 
       except Exception as e:
         ultimo_error = e
         texto_err = str(e)
-        # Si el modelo está saturado (503) o no existe/no está disponible (404), prueba el siguiente modelo
         if (
             "503" in texto_err
             or "UNAVAILABLE" in texto_err
@@ -131,7 +163,6 @@ def generar_con_respaldo(
             or "NOT_FOUND" in texto_err
         ):
           continue
-        # Si hay límite de cuota o problema de la cuenta/clave, pasa a la siguiente cuenta
         break
 
     aviso_tiempo = extraer_aviso_tiempo(str(ultimo_error))
@@ -146,6 +177,9 @@ def generar_con_respaldo(
           f"La cuenta/clave #{idx} de {total_claves} tampoco está disponible"
           f" ahora{aviso_tiempo}."
       )
+
+  if estado_placeholder is not None:
+    estado_placeholder.empty()
 
   raise RuntimeError(
       f"Ninguna de las {total_claves} cuentas ni modelos de respaldo ha podido"
@@ -169,7 +203,7 @@ modelos_api = (
 )
 
 opciones_selector = ["Automático (probar modelos disponibles)"]
-for m in MODELOS_RESPALDO_POR_DEFECTO + modelos_api:
+for m in MODELOS_PRIORITARIOS + modelos_api:
   if m not in opciones_selector:
     opciones_selector.append(m)
 
@@ -181,13 +215,13 @@ modelo_elegido = st.selectbox(
 
 if modelo_elegido == "Automático (probar modelos disponibles)":
   modelos_a_usar = []
-  for m in MODELOS_RESPALDO_POR_DEFECTO + modelos_api:
+  for m in MODELOS_PRIORITARIOS + modelos_api:
     if m not in modelos_a_usar:
       modelos_a_usar.append(m)
 else:
   modelos_a_usar = [modelo_elegido] + [
       m
-      for m in (MODELOS_RESPALDO_POR_DEFECTO + modelos_api)
+      for m in (MODELOS_PRIORITARIOS + modelos_api)
       if m != modelo_elegido
   ]
 
@@ -309,6 +343,8 @@ if "pdf_bytes" not in st.session_state:
 if "info_generacion" not in st.session_state:
   st.session_state.info_generacion = ""
 
+estado_paso1 = st.empty()
+
 if st.button("1. Generar documento resumen con IA", type="primary"):
   if not claves_disponibles:
     st.error("Falta la clave de API.")
@@ -328,6 +364,7 @@ if st.button("1. Generar documento resumen con IA", type="primary"):
             modelos_candidatos=modelos_a_usar,
             system_instruction=SYSTEM_PROMPT_RESUMEN,
             temperature=0.3,
+            estado_placeholder=estado_paso1,
         )
         st.session_state.resumen = texto_resumen
         st.session_state.info_generacion = (
@@ -361,6 +398,8 @@ terapeutas_ok = st.checkbox(
 st.divider()
 st.subheader("3. Generar PDF adjunto y texto de Gmail para mañana")
 
+estado_paso3 = st.empty()
+
 if st.button("Generar PDF y texto de Gmail desde el resumen corregido"):
   if not resumen_corregido.strip():
     st.warning("No hay contenido en el resumen para generar el PDF o el correo.")
@@ -391,6 +430,7 @@ if st.button("Generar PDF y texto de Gmail desde el resumen corregido"):
             modelos_candidatos=modelos_a_usar,
             system_instruction=SYSTEM_PROMPT_GMAIL,
             temperature=0.4,
+            estado_placeholder=estado_paso3,
         )
         st.session_state.texto_gmail = texto_mail
         st.caption(
