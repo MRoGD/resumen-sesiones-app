@@ -16,7 +16,7 @@ st.caption(
     " texto de Gmail para mañana"
 )
 
-MODELOS_RESPALDO = [
+MODELOS_RESPALDO_POR_DEFECTO = [
     "gemini-3.8-flash",
     "gemini-4-hydrogen",
     "gemini-3.8-flash-lite",
@@ -50,6 +50,26 @@ def obtener_claves_gemini() -> list[str]:
   return claves
 
 
+@st.cache_data(ttl=600, show_spinner=False)
+def listar_modelos_disponibles(primera_clave: str) -> list[str]:
+  """Consulta qué modelos acepta la API para esa clave."""
+  if not primera_clave:
+    return []
+  try:
+    client = genai.Client(api_key=primera_clave)
+    nombres: list[str] = []
+    for m in client.models.list():
+      nombre = getattr(m, "name", "") or ""
+      # Quita el prefijo "models/" si viene así
+      nombre_limpio = nombre.replace("models/", "").strip()
+      if nombre_limpio and "gemini" in nombre_limpio.lower():
+        if nombre_limpio not in nombres:
+          nombres.append(nombre_limpio)
+    return nombres
+  except Exception:
+    return []
+
+
 def extraer_aviso_tiempo(mensaje_error: str) -> str:
   match_seg = re.search(
       r"(\d+(?:\.\d+)?)\s*s(?:ec|econds?|eg|egundos?)",
@@ -67,10 +87,11 @@ def extraer_aviso_tiempo(mensaje_error: str) -> str:
 def generar_con_respaldo(
     claves: list[str],
     prompt: str,
-    model: str = "gemini-3.8-flash",
+    modelos_candidatos: list[str],
     system_instruction: str | None = None,
     temperature: float = 0.3,
-) -> str:
+) -> tuple[str, int, str]:
+  """Devuelve (texto_generado, indice_cuenta_usada, modelo_usado)."""
   if not claves:
     raise RuntimeError(
         "No hay claves configuradas. Añade GEMINI_API_KEYS en Secrets."
@@ -81,13 +102,12 @@ def generar_con_respaldo(
       temperature=temperature,
   )
 
-  modelos_a_probar = [model] + [m for m in MODELOS_RESPALDO if m != model]
   ultimo_error = None
   total_claves = len(claves)
 
   for idx, clave in enumerate(claves, start=1):
     client = genai.Client(api_key=clave)
-    for modelo_actual in modelos_a_probar:
+    for modelo_actual in modelos_candidatos:
       try:
         resp = client.models.generate_content(
             model=modelo_actual,
@@ -98,16 +118,12 @@ def generar_con_respaldo(
         if not texto:
           raise RuntimeError("La respuesta ha llegado vacía.")
 
-        if idx > 1 or modelo_actual != model:
-          st.info(
-              f"Se ha completado usando la cuenta #{idx} de {total_claves}"
-              f" (modelo: {modelo_actual})."
-          )
-        return texto
+        return texto, idx, modelo_actual
 
       except Exception as e:
         ultimo_error = e
         texto_err = str(e)
+        # Si el modelo está saturado (503) o no existe/no está disponible (404), prueba el siguiente modelo
         if (
             "503" in texto_err
             or "UNAVAILABLE" in texto_err
@@ -115,6 +131,7 @@ def generar_con_respaldo(
             or "NOT_FOUND" in texto_err
         ):
           continue
+        # Si hay límite de cuota o problema de la cuenta/clave, pasa a la siguiente cuenta
         break
 
     aviso_tiempo = extraer_aviso_tiempo(str(ultimo_error))
@@ -144,6 +161,35 @@ if not claves_disponibles:
   )
   if clave_manual.strip():
     claves_disponibles = [clave_manual.strip()]
+
+modelos_api = (
+    listar_modelos_disponibles(claves_disponibles[0])
+    if claves_disponibles
+    else []
+)
+
+opciones_selector = ["Automático (probar modelos disponibles)"]
+for m in MODELOS_RESPALDO_POR_DEFECTO + modelos_api:
+  if m not in opciones_selector:
+    opciones_selector.append(m)
+
+modelo_elegido = st.selectbox(
+    "Modelo de Gemini a priorizar",
+    options=opciones_selector,
+    index=0,
+)
+
+if modelo_elegido == "Automático (probar modelos disponibles)":
+  modelos_a_usar = []
+  for m in MODELOS_RESPALDO_POR_DEFECTO + modelos_api:
+    if m not in modelos_a_usar:
+      modelos_a_usar.append(m)
+else:
+  modelos_a_usar = [modelo_elegido] + [
+      m
+      for m in (MODELOS_RESPALDO_POR_DEFECTO + modelos_api)
+      if m != modelo_elegido
+  ]
 
 SYSTEM_PROMPT_RESUMEN = """
 Eres un asistente especializado en redactar documentos resumen para clientes a partir de
@@ -260,6 +306,8 @@ if "texto_gmail" not in st.session_state:
   st.session_state.texto_gmail = ""
 if "pdf_bytes" not in st.session_state:
   st.session_state.pdf_bytes = None
+if "info_generacion" not in st.session_state:
+  st.session_state.info_generacion = ""
 
 if st.button("1. Generar documento resumen con IA", type="primary"):
   if not claves_disponibles:
@@ -274,17 +322,25 @@ if st.button("1. Generar documento resumen con IA", type="primary"):
             f"Fecha de sesión: {fecha_sesion}\n\n"
             f"TRANSCRIPCIÓN DE ENTRADA:\n{transcripcion}"
         )
-        st.session_state.resumen = generar_con_respaldo(
+        texto_resumen, num_cuenta, modelo_usado = generar_con_respaldo(
             claves=claves_disponibles,
             prompt=prompt,
-            model="gemini-3.8-flash",
+            modelos_candidatos=modelos_a_usar,
             system_instruction=SYSTEM_PROMPT_RESUMEN,
             temperature=0.3,
+        )
+        st.session_state.resumen = texto_resumen
+        st.session_state.info_generacion = (
+            f"Generado con la cuenta #{num_cuenta} de"
+            f" {len(claves_disponibles)} usando el modelo `{modelo_usado}`."
         )
         st.session_state.texto_gmail = ""
         st.session_state.pdf_bytes = None
       except Exception as err:
         st.error(f"No se ha podido generar el resumen: {err}")
+
+if st.session_state.info_generacion:
+  st.info(st.session_state.info_generacion)
 
 st.divider()
 st.subheader("2. Revisión de coherencia y corrección de las terapeutas")
@@ -329,12 +385,17 @@ if st.button("Generar PDF y texto de Gmail desde el resumen corregido"):
             f"Fecha de la sesión: {fecha_sesion}\n"
             f"Resumen validado:\n{resumen_corregido}"
         )
-        st.session_state.texto_gmail = generar_con_respaldo(
+        texto_mail, num_cuenta_mail, modelo_mail = generar_con_respaldo(
             claves=claves_disponibles,
             prompt=prompt_gmail,
-            model="gemini-3.8-flash",
+            modelos_candidatos=modelos_a_usar,
             system_instruction=SYSTEM_PROMPT_GMAIL,
             temperature=0.4,
+        )
+        st.session_state.texto_gmail = texto_mail
+        st.caption(
+            f"Correo redactado con la cuenta #{num_cuenta_mail} y modelo"
+            f" `{modelo_mail}`."
         )
       except Exception as err:
         st.error(
