@@ -16,6 +16,12 @@ st.caption(
     " texto de Gmail para mañana"
 )
 
+MODELOS_RESPALDO = [
+    "gemini-3.8-flash",
+    "gemini-4-hydrogen",
+    "gemini-3.8-flash-lite",
+]
+
 
 def obtener_claves_gemini() -> list[str]:
   claves: list[str] = []
@@ -75,43 +81,58 @@ def generar_con_respaldo(
       temperature=temperature,
   )
 
+  modelos_a_probar = [model] + [m for m in MODELOS_RESPALDO if m != model]
   ultimo_error = None
-  total = len(claves)
+  total_claves = len(claves)
 
   for idx, clave in enumerate(claves, start=1):
-    try:
-      client = genai.Client(api_key=clave)
-      resp = client.models.generate_content(
-          model=model,
-          contents=prompt,
-          config=config,
+    client = genai.Client(api_key=clave)
+    for modelo_actual in modelos_a_probar:
+      try:
+        resp = client.models.generate_content(
+            model=modelo_actual,
+            contents=prompt,
+            config=config,
+        )
+        texto = (getattr(resp, "text", None) or "").strip()
+        if not texto:
+          raise RuntimeError("La respuesta ha llegado vacía.")
+
+        if idx > 1 or modelo_actual != model:
+          st.info(
+              f"Se ha completado usando la cuenta #{idx} de {total_claves}"
+              f" (modelo: {modelo_actual})."
+          )
+        return texto
+
+      except Exception as e:
+        ultimo_error = e
+        texto_err = str(e)
+        if (
+            "503" in texto_err
+            or "UNAVAILABLE" in texto_err
+            or "404" in texto_err
+            or "NOT_FOUND" in texto_err
+        ):
+          continue
+        break
+
+    aviso_tiempo = extraer_aviso_tiempo(str(ultimo_error))
+    if idx < total_claves:
+      st.warning(
+          f"La cuenta/clave #{idx} de {total_claves} no está disponible ahora"
+          f" (límite/tiempo agotado o alta demanda){aviso_tiempo}. Buscando en"
+          f" la cuenta #{idx + 1}..."
       )
-      texto = (getattr(resp, "text", None) or "").strip()
-      if not texto:
-        raise RuntimeError("La respuesta ha llegado vacía.")
-
-      if idx > 1:
-        st.info(f"Se ha completado usando la cuenta/clave #{idx} de {total}.")
-      return texto
-
-    except Exception as e:
-      ultimo_error = e
-      aviso_tiempo = extraer_aviso_tiempo(str(e))
-      if idx < total:
-        st.warning(
-            f"La cuenta/clave #{idx} de {total} no está disponible ahora"
-            f" (límite/tiempo agotado o fallo temporal){aviso_tiempo}."
-            f" Buscando en la cuenta #{idx + 1}..."
-        )
-      else:
-        st.warning(
-            f"La cuenta/clave #{idx} de {total} tampoco está disponible"
-            f" ahora{aviso_tiempo}."
-        )
+    else:
+      st.warning(
+          f"La cuenta/clave #{idx} de {total_claves} tampoco está disponible"
+          f" ahora{aviso_tiempo}."
+      )
 
   raise RuntimeError(
-      f"Ninguna de las {total} cuentas de Gemini ha podido completar la"
-      f" petición. Último error: {ultimo_error}"
+      f"Ninguna de las {total_claves} cuentas ni modelos de respaldo ha podido"
+      f" completar la petición. Último error: {ultimo_error}"
   )
 
 
