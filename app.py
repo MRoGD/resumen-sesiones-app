@@ -268,6 +268,8 @@ El mensaje debe:
 def limpiar_texto_pdf(texto: str) -> str:
   texto = re.sub(r"^#{1,3}\s*", "", texto, flags=re.MULTILINE)
   texto = texto.replace("**", "").replace("*", "")
+  # Evita secuencias continuas enormes sin espacios que impidan el salto de línea en FPDF
+  texto = re.sub(r"(\S{45})", r"\1 ", texto)
   return texto.encode("latin-1", errors="replace").decode("latin-1")
 
 
@@ -278,23 +280,17 @@ def crear_pdf_bytes(
   pdf.set_auto_page_break(auto=True, margin=18)
   pdf.add_page()
 
+  ancho_util = max(50.0, pdf.w - pdf.l_margin - pdf.r_margin)
+
+  def escribir_bloque(texto: str, alto: float = 6.5) -> None:
+    pdf.set_x(pdf.l_margin)
+    pdf.multi_cell(ancho_util, alto, texto)
+
   pdf.set_font("Helvetica", "B", 16)
-  pdf.cell(
-      0,
-      10,
-      limpiar_texto_pdf(f"Resumen de tu sesion - {fecha_sesion}"),
-      new_x="LMARGIN",
-      new_y="NEXT",
-  )
+  escribir_bloque(limpiar_texto_pdf(f"Resumen de tu sesion - {fecha_sesion}"), alto=9.0)
 
   pdf.set_font("Helvetica", "", 11)
-  pdf.cell(
-      0,
-      8,
-      limpiar_texto_pdf(f"Cliente: {nombre_cliente}"),
-      new_x="LMARGIN",
-      new_y="NEXT",
-  )
+  escribir_bloque(limpiar_texto_pdf(f"Cliente: {nombre_cliente}"), alto=7.5)
   pdf.ln(4)
 
   for linea in contenido_markdown.splitlines():
@@ -305,14 +301,14 @@ def crear_pdf_bytes(
     if linea.lstrip().startswith("## "):
       pdf.ln(3)
       pdf.set_font("Helvetica", "B", 12)
-      pdf.multi_cell(0, 7, linea_limpia)
+      escribir_bloque(linea_limpia, alto=7.0)
       pdf.ln(1)
     elif linea.lstrip().startswith("- "):
       pdf.set_font("Helvetica", "", 11)
-      pdf.multi_cell(0, 6.5, f"  - {linea_limpia[2:]}")
+      escribir_bloque(f"  - {linea_limpia[2:]}", alto=6.5)
     else:
       pdf.set_font("Helvetica", "", 11)
-      pdf.multi_cell(0, 6.5, linea_limpia)
+      escribir_bloque(linea_limpia, alto=6.5)
 
   salida = pdf.output()
   return bytes(salida) if isinstance(salida, (bytearray, bytes)) else salida
