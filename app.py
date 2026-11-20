@@ -16,12 +16,113 @@ st.caption(
     " texto de Gmail para mañana"
 )
 
-api_key = os.environ.get("GEMINI_API_KEY", "")
-if not api_key:
-  api_key = st.text_input(
+
+def obtener_claves_gemini() -> list[str]:
+  claves: list[str] = []
+
+  if "GEMINI_API_KEYS" in st.secrets:
+    raw_keys = st.secrets["GEMINI_API_KEYS"]
+    if isinstance(raw_keys, (list, tuple)):
+      for k in raw_keys:
+        limpia = str(k).strip()
+        if limpia and limpia not in claves:
+          claves.append(limpia)
+    elif isinstance(raw_keys, str):
+      for linea in raw_keys.splitlines():
+        limpia = linea.strip().strip(",").strip('"').strip("'")
+        if limpia and limpia not in claves:
+          claves.append(limpia)
+
+  for clave_sola in [
+      st.secrets.get("GEMINI_API_KEY", ""),
+      os.environ.get("GEMINI_API_KEY", ""),
+  ]:
+    limpia = str(clave_sola).strip()
+    if limpia and limpia not in claves:
+      claves.append(limpia)
+
+  return claves
+
+
+def extraer_aviso_tiempo(mensaje_error: str) -> str:
+  match_seg = re.search(
+      r"(\d+(?:\.\d+)?)\s*s(?:ec|econds?|eg|egundos?)",
+      mensaje_error,
+      re.IGNORECASE,
+  )
+  if match_seg:
+    return f" (tiempo estimado de espera: ~{match_seg.group(1)} s)"
+  return (
+      " (Google no indica la hora exacta de restablecimiento; revisa el uso en"
+      " Gemini)"
+  )
+
+
+def generar_con_respaldo(
+    claves: list[str],
+    prompt: str,
+    model: str = "gemini-3.8-flash",
+    system_instruction: str | None = None,
+    temperature: float = 0.3,
+) -> str:
+  if not claves:
+    raise RuntimeError(
+        "No hay claves configuradas. Añade GEMINI_API_KEYS en Secrets."
+    )
+
+  config = types.GenerateContentConfig(
+      system_instruction=system_instruction,
+      temperature=temperature,
+  )
+
+  ultimo_error = None
+  total = len(claves)
+
+  for idx, clave in enumerate(claves, start=1):
+    try:
+      client = genai.Client(api_key=clave)
+      resp = client.models.generate_content(
+          model=model,
+          contents=prompt,
+          config=config,
+      )
+      texto = (getattr(resp, "text", None) or "").strip()
+      if not texto:
+        raise RuntimeError("La respuesta ha llegado vacía.")
+
+      if idx > 1:
+        st.info(f"Se ha completado usando la cuenta/clave #{idx} de {total}.")
+      return texto
+
+    except Exception as e:
+      ultimo_error = e
+      aviso_tiempo = extraer_aviso_tiempo(str(e))
+      if idx < total:
+        st.warning(
+            f"La cuenta/clave #{idx} de {total} no está disponible ahora"
+            f" (límite/tiempo agotado o fallo temporal){aviso_tiempo}."
+            f" Buscando en la cuenta #{idx + 1}..."
+        )
+      else:
+        st.warning(
+            f"La cuenta/clave #{idx} de {total} tampoco está disponible"
+            f" ahora{aviso_tiempo}."
+        )
+
+  raise RuntimeError(
+      f"Ninguna de las {total} cuentas de Gemini ha podido completar la"
+      f" petición. Último error: {ultimo_error}"
+  )
+
+
+claves_disponibles = obtener_claves_gemini()
+if not claves_disponibles:
+  clave_manual = st.text_input(
       "Introduce tu clave gratuita de Google AI Studio (Gemini API Key)",
       type="password",
   )
+  if clave_manual.strip():
+    claves_disponibles = [clave_manual.strip()]
 
 SYSTEM_PROMPT_RESUMEN = """
 Eres un asistente especializado en redactar documentos resumen para clientes a partir de
@@ -140,35 +241,36 @@ if "pdf_bytes" not in st.session_state:
   st.session_state.pdf_bytes = None
 
 if st.button("1. Generar documento resumen con IA", type="primary"):
-  if not api_key:
+  if not claves_disponibles:
     st.error("Falta la clave de API.")
   elif not transcripcion.strip():
     st.warning("Pega primero la transcripción de la sesión.")
   else:
     with st.spinner("Generando resumen de bloqueos, significado y resolución..."):
-      client = genai.Client(api_key=api_key)
-      prompt = (
-          f"Cliente: {nombre_cliente}\n"
-          f"Fecha de sesión: {fecha_sesion}\n\n"
-          f"TRANSCRIPCIÓN DE ENTRADA:\n{transcripcion}"
-      )
-      resp = client.models.generate_content(
-         model="gemini-3.8-flash",
-          contents=prompt,
-          config=types.GenerateContentConfig(
-              system_instruction=SYSTEM_PROMPT_RESUMEN,
-              temperature=0.3,
-          ),
-      )
-      st.session_state.resumen = resp.text
-      st.session_state.texto_gmail = ""
-      st.session_state.pdf_bytes = None
+      try:
+        prompt = (
+            f"Cliente: {nombre_cliente}\n"
+            f"Fecha de sesión: {fecha_sesion}\n\n"
+            f"TRANSCRIPCIÓN DE ENTRADA:\n{transcripcion}"
+        )
+        st.session_state.resumen = generar_con_respaldo(
+            claves=claves_disponibles,
+            prompt=prompt,
+            model="gemini-3.8-flash",
+            system_instruction=SYSTEM_PROMPT_RESUMEN,
+            temperature=0.3,
+        )
+        st.session_state.texto_gmail = ""
+        st.session_state.pdf_bytes = None
+      except Exception as err:
+        st.error(f"No se ha podido generar el resumen: {err}")
 
 st.divider()
 st.subheader("2. Revisión de coherencia y corrección de las terapeutas")
 
 resumen_corregido = st.text_area(
-    "Texto final del resumen (aplica aquí tu revisión de coherencia y las correcciones de las terapeutas):",
+    "Texto final del resumen (aplica aquí tu revisión de coherencia y las"
+    " correcciones de las terapeutas):",
     value=st.session_state.resumen,
     height=320,
 )
@@ -190,7 +292,7 @@ if st.button("Generar PDF y texto de Gmail desde el resumen corregido"):
         "Marca primero las dos casillas de revisión de coherencia y validación"
         " de las terapeutas."
     )
-  elif not api_key:
+  elif not claves_disponibles:
     st.error("Falta la clave de API para redactar el mensaje de Gmail.")
   else:
     with st.spinner("Creando PDF y redactando el mensaje de Gmail..."):
@@ -200,25 +302,27 @@ if st.button("Generar PDF y texto de Gmail desde el resumen corregido"):
           contenido_markdown=resumen_corregido,
       )
 
-      client = genai.Client(api_key=api_key)
-      prompt_gmail = (
-          f"Nombre del cliente: {nombre_cliente}\n"
-          f"Fecha de la sesión: {fecha_sesion}\n"
-          f"Resumen validado:\n{resumen_corregido}"
-      )
-      resp_gmail = client.models.generate_content(
-          model="gemini-3.8-flash",
-          contents=prompt_gmail,
-          config=types.GenerateContentConfig(
-              system_instruction=SYSTEM_PROMPT_GMAIL,
-              temperature=0.4,
-          ),
-      )
-      st.session_state.texto_gmail = resp_gmail.text
+      try:
+        prompt_gmail = (
+            f"Nombre del cliente: {nombre_cliente}\n"
+            f"Fecha de la sesión: {fecha_sesion}\n"
+            f"Resumen validado:\n{resumen_corregido}"
+        )
+        st.session_state.texto_gmail = generar_con_respaldo(
+            claves=claves_disponibles,
+            prompt=prompt_gmail,
+            model="gemini-3.8-flash",
+            system_instruction=SYSTEM_PROMPT_GMAIL,
+            temperature=0.4,
+        )
+      except Exception as err:
+        st.error(
+            f"Se creó el PDF, pero no se pudo redactar el correo: {err}"
+        )
 
 if st.session_state.pdf_bytes:
-  nombre_archivo_pdf = f"Resumen_sesion_{nombre_cliente}_{fecha_sesion}.pdf".replace(
-      " ", "_"
+  nombre_archivo_pdf = (
+      f"Resumen_sesion_{nombre_cliente}_{fecha_sesion}.pdf".replace(" ", "_")
   )
   st.download_button(
       label="Descargar PDF para adjuntar en Gmail",
@@ -231,7 +335,8 @@ if st.session_state.texto_gmail:
   st.markdown("**Texto sugerido para Gmail (envío al día siguiente):**")
   bloque_correo = (
       f"Para: {correo_cliente if correo_cliente else '[correo del cliente]'}\n"
-      f"Asunto: ¿Cómo te has sentido hoy? · Resumen de tu sesión ({fecha_sesion})\n\n"
+      f"Asunto: ¿Cómo te has sentido hoy? · Resumen de tu sesión"
+      f" ({fecha_sesion})\n\n"
       f"{st.session_state.texto_gmail}"
   )
   st.code(bloque_correo, language="text")
