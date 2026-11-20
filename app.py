@@ -1,3 +1,4 @@
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
 import io
 import os
 import re
@@ -31,6 +32,8 @@ EXCLUIR_MODELOS = (
     "tts",
     "aqa",
 )
+
+TIMEOUT_POR_INTENTO_SEG = 25
 
 
 def obtener_claves_gemini() -> list[str]:
@@ -84,7 +87,7 @@ def listar_modelos_disponibles(primera_clave: str) -> list[str]:
           and nombre_limpio not in nombres
       ):
         nombres.append(nombre_limpio)
-    return nombres[:6]
+    return nombres[:5]
   except Exception:
     return []
 
@@ -101,6 +104,33 @@ def extraer_aviso_tiempo(mensaje_error: str) -> str:
       " (Google no indica la hora exacta de restablecimiento; revisa el uso en"
       " Gemini)"
   )
+
+
+def _llamar_modelo_con_timeout(
+    clave: str,
+    modelo: str,
+    prompt: str,
+    config: types.GenerateContentConfig,
+    timeout_seg: int = TIMEOUT_POR_INTENTO_SEG,
+) -> str:
+  def _ejecutar() -> str:
+    client = genai.Client(api_key=clave)
+    resp = client.models.generate_content(
+        model=modelo,
+        contents=prompt,
+        config=config,
+    )
+    return (getattr(resp, "text", None) or "").strip()
+
+  with ThreadPoolExecutor(max_workers=1) as executor:
+    futuro = executor.submit(_ejecutar)
+    try:
+      return futuro.result(timeout=timeout_seg)
+    except FuturesTimeoutError as exc:
+      raise TimeoutError(
+          f"El modelo `{modelo}` tardó más de {timeout_seg} segundos en"
+          " responder."
+      ) from exc
 
 
 def generar_con_respaldo(
@@ -133,19 +163,20 @@ def generar_con_respaldo(
   total_claves = len(claves)
 
   for idx, clave in enumerate(claves, start=1):
-    client = genai.Client(api_key=clave)
     for modelo_actual in candidatos_limpios:
       if estado_placeholder is not None:
         estado_placeholder.caption(
-            f"Probando cuenta #{idx}/{total_claves} con `{modelo_actual}`..."
+            f"Probando cuenta #{idx}/{total_claves} con `{modelo_actual}`"
+            f" (máx. {TIMEOUT_POR_INTENTO_SEG}s)..."
         )
       try:
-        resp = client.models.generate_content(
-            model=modelo_actual,
-            contents=prompt,
+        texto = _llamar_modelo_con_timeout(
+            clave=clave,
+            modelo=modelo_actual,
+            prompt=prompt,
             config=config,
+            timeout_seg=TIMEOUT_POR_INTENTO_SEG,
         )
-        texto = (getattr(resp, "text", None) or "").strip()
         if not texto:
           raise RuntimeError("La respuesta ha llegado vacía.")
 
@@ -157,7 +188,8 @@ def generar_con_respaldo(
         ultimo_error = e
         texto_err = str(e)
         if (
-            "503" in texto_err
+            isinstance(e, TimeoutError)
+            or "503" in texto_err
             or "UNAVAILABLE" in texto_err
             or "404" in texto_err
             or "NOT_FOUND" in texto_err
@@ -169,8 +201,8 @@ def generar_con_respaldo(
     if idx < total_claves:
       st.warning(
           f"La cuenta/clave #{idx} de {total_claves} no está disponible ahora"
-          f" (límite/tiempo agotado o alta demanda){aviso_tiempo}. Buscando en"
-          f" la cuenta #{idx + 1}..."
+          f" (límite/tiempo agotado o demora){aviso_tiempo}. Buscando en la"
+          f" cuenta #{idx + 1}..."
       )
     else:
       st.warning(
@@ -268,7 +300,6 @@ El mensaje debe:
 def limpiar_texto_pdf(texto: str) -> str:
   texto = re.sub(r"^#{1,3}\s*", "", texto, flags=re.MULTILINE)
   texto = texto.replace("**", "").replace("*", "")
-  # Evita secuencias continuas enormes sin espacios que impidan el salto de línea en FPDF
   texto = re.sub(r"(\S{45})", r"\1 ", texto)
   return texto.encode("latin-1", errors="replace").decode("latin-1")
 
@@ -287,7 +318,9 @@ def crear_pdf_bytes(
     pdf.multi_cell(ancho_util, alto, texto)
 
   pdf.set_font("Helvetica", "B", 16)
-  escribir_bloque(limpiar_texto_pdf(f"Resumen de tu sesion - {fecha_sesion}"), alto=9.0)
+  escribir_bloque(
+      limpiar_texto_pdf(f"Resumen de tu sesion - {fecha_sesion}"), alto=9.0
+  )
 
   pdf.set_font("Helvetica", "", 11)
   escribir_bloque(limpiar_texto_pdf(f"Cliente: {nombre_cliente}"), alto=7.5)
