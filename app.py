@@ -21,6 +21,7 @@ MODELOS_PRIORITARIOS = [
     "gemini-3.8-flash",
     "gemini-4-hydrogen",
     "gemini-3.8-flash-lite",
+    "gemini-3.1-pro-preview",
 ]
 
 EXCLUIR_MODELOS = (
@@ -31,6 +32,10 @@ EXCLUIR_MODELOS = (
     "live",
     "tts",
     "aqa",
+    "gemini-1.0",
+    "gemini-1.5",
+    "gemini-2.0",
+    "gemini-2.5",
 )
 
 TIMEOUT_POR_INTENTO_SEG = 25
@@ -155,7 +160,11 @@ def generar_con_respaldo(
   candidatos_limpios = []
   for m in modelos_candidatos:
     m_limpio = m.replace("models/", "").strip()
-    if m_limpio and m_limpio not in candidatos_limpios:
+    if (
+        m_limpio
+        and es_modelo_texto_valido(m_limpio)
+        and m_limpio not in candidatos_limpios
+    ):
       candidatos_limpios.append(m_limpio)
   candidatos_limpios = candidatos_limpios[:5]
 
